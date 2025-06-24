@@ -118,14 +118,9 @@ def load_config():
         merged_remote_config = {**general_config.DEFAULT_DB_CONFIG, **project_config.REMOTE_DB_CONFIG}
         merged_local_config = {**general_config.DEFAULT_DB_CONFIG, **project_config.LOCAL_DB_CONFIG}
         
-        # Merge table exclusions
-        excluded_tables = general_config.COMMON_EXCLUDED_TABLES.copy()
-        if hasattr(project_config, 'PROJECT_EXCLUDED_TABLES'):
-            excluded_tables.update(project_config.PROJECT_EXCLUDED_TABLES)
-        
-        excluded_patterns = general_config.COMMON_EXCLUDED_PATTERNS.copy()
-        if hasattr(project_config, 'PROJECT_EXCLUDED_PATTERNS'):
-            excluded_patterns.extend(project_config.PROJECT_EXCLUDED_PATTERNS)
+        # Get table exclusions from project config
+        excluded_tables = getattr(project_config, 'EXCLUDED_TABLES', set())
+        excluded_patterns = getattr(project_config, 'EXCLUDED_PATTERNS', [])
         
         # Merge sync configuration
         merged_sync_config = general_config.SYNC_CONFIG.copy()

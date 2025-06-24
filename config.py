@@ -30,48 +30,6 @@ DEFAULT_DB_CONFIG = {
 }
 
 # ====================================================================
-# COMMON TABLE EXCLUSIONS (Applied to all projects)
-# ====================================================================
-
-# Tables to exclude from all projects (exact table names)
-COMMON_EXCLUDED_TABLES = {
-    # Archive and audit tables (usually large and not needed for development)
-    'radacct_archive',
-    'auditlog_logentry',
-    'helpdesk_followup',
-    'subscriber_logs',
-    'fb_queues',
-    'broadcast',
-    'olt_logs',
-    'spin_logs',
-    'subscriber_direct',
-    'sms_logs',
-    'vod_list',
-    'tv_schedule',
-    'sms_queues',
-    # Common system tables
-    'django_session',
-    'django_admin_log',
-    'auth_permission',
-    'django_content_type',
-    'django_migrations',
-}
-
-# Table name patterns to exclude from all projects
-COMMON_EXCLUDED_PATTERNS = [
-    'rad',        # All RADIUS tables (radcheck, radreply, radacct, etc.)
-    'copy',       # All backup/copy tables
-    'bak',
-    'backup',
-    'temp',
-    'log',
-    'cache',
-    'audit',
-    'session',
-    'migration',
-]
-
-# ====================================================================
 # GENERAL SYNC BEHAVIOR CONFIGURATION
 # ====================================================================
 
