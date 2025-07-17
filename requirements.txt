@@ -4,6 +4,9 @@
 # MySQL database connector
 pymysql>=1.0.0
 
+# Progress bars (optional - will fall back to simple counters if not available)
+tqdm>=4.60.0
+
 # Note: sshpass is a system-level dependency and must be installed separately:
 # macOS: brew install sshpass
 # Linux: sudo apt-get install sshpass 

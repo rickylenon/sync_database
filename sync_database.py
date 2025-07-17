@@ -36,6 +36,53 @@ import pymysql
 import os
 from datetime import datetime
 
+# Progress bar support (optional)
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+
+class ProgressTracker:
+    """Progress tracking with tqdm fallback to simple counters"""
+    
+    def __init__(self, total, description="Progress", use_tqdm=True):
+        self.total = total
+        self.current = 0
+        self.description = description
+        self.use_tqdm = use_tqdm and TQDM_AVAILABLE
+        
+        if self.use_tqdm:
+            self.pbar = tqdm(total=total, desc=description, unit="items", 
+                           bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+        else:
+            self.pbar = None
+            print(f"{description}: 0/{total} (0%)")
+    
+    def update(self, n=1):
+        """Update progress by n steps"""
+        self.current += n
+        if self.use_tqdm and self.pbar:
+            self.pbar.update(n)
+        else:
+            # Simple counter fallback
+            percentage = (self.current / self.total * 100) if self.total > 0 else 0
+            print(f"\r{self.description}: {self.current}/{self.total} ({percentage:.1f}%)", end="", flush=True)
+    
+    def set_description(self, desc):
+        """Update the description"""
+        self.description = desc
+        if self.use_tqdm and self.pbar:
+            self.pbar.set_description(desc)
+    
+    def close(self):
+        """Close the progress bar"""
+        if self.use_tqdm and self.pbar:
+            self.pbar.close()
+        else:
+            # Final newline for counter mode
+            print()
+
 # Import configuration
 def load_config():
     """Load general config and project-specific config - MUST specify config_*.py"""
@@ -515,37 +562,42 @@ class DatabaseSync:
                 
                 # Copy all data from remote if there are records
                 if remote_count > 0:
-                    # Get all data from remote
-                    with remote_conn.cursor() as remote_cursor:
-                        remote_cursor.execute(f"SELECT * FROM `{table_name}`")
-                        
-                        # Process in batches for large tables
-                        batch_size = 1000
-                        inserted_count = 0
-                        
-                        while True:
-                            rows = remote_cursor.fetchmany(batch_size)
-                            if not rows:
-                                break
-                            
-                            # Get column names from first row
-                            if inserted_count == 0:
-                                # Get column names from the remote cursor description
-                                columns = [desc[0] for desc in remote_cursor.description]
-                                placeholders = ", ".join(["%s"] * len(columns))
-                                column_names = ", ".join([f"`{col}`" for col in columns])
-                                insert_sql = f"INSERT INTO `{table_name}` ({column_names}) VALUES ({placeholders})"
-                            
-                            # Insert batch
-                            cursor.executemany(insert_sql, rows)
-                            inserted_count += len(rows)
-                            
-                            # Show progress for large tables
-                            if inserted_count % 10000 == 0:
-                                print(f"    📝 Inserted {inserted_count:,} records...")
+                    # Create progress tracker for record insertion
+                    record_progress = ProgressTracker(remote_count, f"{table_name} records")
                     
-                    self.stats['records_inserted'] += inserted_count
-                    self.log(f"  ✅ Inserted {inserted_count:,} records into {table_name}")
+                    try:
+                        # Get all data from remote
+                        with remote_conn.cursor() as remote_cursor:
+                            remote_cursor.execute(f"SELECT * FROM `{table_name}`")
+                            
+                            # Process in batches for large tables
+                            batch_size = 1000
+                            inserted_count = 0
+                            
+                            while True:
+                                rows = remote_cursor.fetchmany(batch_size)
+                                if not rows:
+                                    break
+                                
+                                # Get column names from first row
+                                if inserted_count == 0:
+                                    # Get column names from the remote cursor description
+                                    columns = [desc[0] for desc in remote_cursor.description]
+                                    placeholders = ", ".join(["%s"] * len(columns))
+                                    column_names = ", ".join([f"`{col}`" for col in columns])
+                                    insert_sql = f"INSERT INTO `{table_name}` ({column_names}) VALUES ({placeholders})"
+                                
+                                # Insert batch
+                                cursor.executemany(insert_sql, rows)
+                                inserted_count += len(rows)
+                                
+                                # Update progress tracker
+                                record_progress.update(len(rows))
+                        
+                        self.stats['records_inserted'] += inserted_count
+                        self.log(f"  ✅ Inserted {inserted_count:,} records into {table_name}")
+                    finally:
+                        record_progress.close()
                 else:
                     self.log(f"  ℹ️  {table_name} is empty (no records to copy)")
                 
@@ -637,98 +689,110 @@ class DatabaseSync:
             
             # Perform actual sync operations
             if to_insert or to_update or to_delete:
-                with local_conn.cursor() as cursor:
-                    # INSERT new records (with foreign key error handling)
-                    insert_success = 0
-                    for key in to_insert:
-                        try:
-                            record = remote_dict[key]
-                            columns = list(record.keys())
-                            values = list(record.values())
-                            
-                            placeholders = ", ".join(["%s"] * len(values))
-                            column_names = ", ".join([f"`{col}`" for col in columns])
-                            
-                            sql = f"INSERT INTO `{table_name}` ({column_names}) VALUES ({placeholders})"
-                            cursor.execute(sql, values)
-                            insert_success += 1
-                            self.stats['records_inserted'] += 1
-                        except Exception as e:
-                            if "foreign key constraint" in str(e).lower() or "duplicate entry" in str(e).lower():
-                                # Skip foreign key constraint and duplicate key errors but continue
-                                continue
-                            else:
-                                # Re-raise other errors
-                                raise e
-                    
-                    # UPDATE existing records (with foreign key error handling)
-                    update_success = 0
-                    for key in to_update:
-                        try:
-                            record = remote_dict[key]
-                            
-                            # Build SET clause (exclude primary key columns)
-                            set_clauses = []
-                            values = []
-                            for col, val in record.items():
-                                if col not in pk_columns:
-                                    set_clauses.append(f"`{col}` = %s")
-                                    values.append(val)
-                            
-                            # Build WHERE clause
-                            where_clauses = []
-                            for col in pk_columns:
-                                where_clauses.append(f"`{col}` = %s")
-                                values.append(record[col])
-                            
-                            if set_clauses:  # Only update if there are non-PK columns
-                                sql = f"UPDATE `{table_name}` SET {', '.join(set_clauses)} WHERE {' AND '.join(where_clauses)}"
-                                cursor.execute(sql, values)
-                                update_success += 1
-                                self.stats['records_updated'] += 1
-                        except Exception as e:
-                            if "foreign key constraint" in str(e).lower() or "duplicate entry" in str(e).lower():
-                                # Skip foreign key constraint and duplicate key errors but continue
-                                continue
-                            else:
-                                # Re-raise other errors
-                                raise e
-                    
-                    # DELETE removed records (skip if foreign key errors)
-                    delete_success = 0
-                    delete_skipped = 0
-                    for key in to_delete:
-                        try:
-                            where_clauses = []
-                            values = []
-                            
-                            if isinstance(key, tuple):
-                                for i, col in enumerate(pk_columns):
-                                    where_clauses.append(f"`{col}` = %s")
-                                    values.append(key[i])
-                            else:
-                                where_clauses.append(f"`{pk_columns[0]}` = %s")
-                                values.append(key)
-                            
-                            sql = f"DELETE FROM `{table_name}` WHERE {' AND '.join(where_clauses)}"
-                            cursor.execute(sql, values)
-                            delete_success += 1
-                            self.stats['records_deleted'] += 1
-                        except Exception as e:
-                            if "foreign key constraint" in str(e).lower():
-                                # Skip foreign key constraint errors for deletions
-                                delete_skipped += 1
-                                continue
-                            else:
-                                # Re-raise other errors
-                                raise e
-                    
-                    # Log detailed results for tables with foreign key issues
-                    if delete_skipped > 0:
-                        self.log(f"  ⚠️  {table_name}: Skipped {delete_skipped} deletions (foreign key constraints)")
+                total_operations = len(to_insert) + len(to_update) + len(to_delete)
+                record_progress = ProgressTracker(total_operations, f"{table_name} records")
                 
-                local_conn.commit()
-                self.stats['tables_synced'] += 1
+                try:
+                    with local_conn.cursor() as cursor:
+                        # INSERT new records (with foreign key error handling)
+                        insert_success = 0
+                        for key in to_insert:
+                            try:
+                                record = remote_dict[key]
+                                columns = list(record.keys())
+                                values = list(record.values())
+                                
+                                placeholders = ", ".join(["%s"] * len(values))
+                                column_names = ", ".join([f"`{col}`" for col in columns])
+                                
+                                sql = f"INSERT INTO `{table_name}` ({column_names}) VALUES ({placeholders})"
+                                cursor.execute(sql, values)
+                                insert_success += 1
+                                self.stats['records_inserted'] += 1
+                            except Exception as e:
+                                if "foreign key constraint" in str(e).lower() or "duplicate entry" in str(e).lower():
+                                    # Skip foreign key constraint and duplicate key errors but continue
+                                    pass
+                                else:
+                                    # Re-raise other errors
+                                    raise e
+                            finally:
+                                record_progress.update(1)
+                        
+                        # UPDATE existing records (with foreign key error handling)
+                        update_success = 0
+                        for key in to_update:
+                            try:
+                                record = remote_dict[key]
+                                
+                                # Build SET clause (exclude primary key columns)
+                                set_clauses = []
+                                values = []
+                                for col, val in record.items():
+                                    if col not in pk_columns:
+                                        set_clauses.append(f"`{col}` = %s")
+                                        values.append(val)
+                                
+                                # Build WHERE clause
+                                where_clauses = []
+                                for col in pk_columns:
+                                    where_clauses.append(f"`{col}` = %s")
+                                    values.append(record[col])
+                                
+                                if set_clauses:  # Only update if there are non-PK columns
+                                    sql = f"UPDATE `{table_name}` SET {', '.join(set_clauses)} WHERE {' AND '.join(where_clauses)}"
+                                    cursor.execute(sql, values)
+                                    update_success += 1
+                                    self.stats['records_updated'] += 1
+                            except Exception as e:
+                                if "foreign key constraint" in str(e).lower() or "duplicate entry" in str(e).lower():
+                                    # Skip foreign key constraint and duplicate key errors but continue
+                                    pass
+                                else:
+                                    # Re-raise other errors
+                                    raise e
+                            finally:
+                                record_progress.update(1)
+                        
+                        # DELETE removed records (skip if foreign key errors)
+                        delete_success = 0
+                        delete_skipped = 0
+                        for key in to_delete:
+                            try:
+                                where_clauses = []
+                                values = []
+                                
+                                if isinstance(key, tuple):
+                                    for i, col in enumerate(pk_columns):
+                                        where_clauses.append(f"`{col}` = %s")
+                                        values.append(key[i])
+                                else:
+                                    where_clauses.append(f"`{pk_columns[0]}` = %s")
+                                    values.append(key)
+                                
+                                sql = f"DELETE FROM `{table_name}` WHERE {' AND '.join(where_clauses)}"
+                                cursor.execute(sql, values)
+                                delete_success += 1
+                                self.stats['records_deleted'] += 1
+                            except Exception as e:
+                                if "foreign key constraint" in str(e).lower():
+                                    # Skip foreign key constraint errors for deletions
+                                    delete_skipped += 1
+                                    pass
+                                else:
+                                    # Re-raise other errors
+                                    raise e
+                            finally:
+                                record_progress.update(1)
+                        
+                        # Log detailed results for tables with foreign key issues
+                        if delete_skipped > 0:
+                            self.log(f"  ⚠️  {table_name}: Skipped {delete_skipped} deletions (foreign key constraints)")
+                    
+                    local_conn.commit()
+                    self.stats['tables_synced'] += 1
+                finally:
+                    record_progress.close()
             
         except Exception as e:
             self.log(f"❌ Error syncing {table_name}: {e}", "ERROR")
@@ -862,10 +926,17 @@ class DatabaseSync:
             print()
             self.log("Starting table synchronization...")
             
-            # Sync each table
-            for i, table in enumerate(sync_tables, 1):
-                print(f"\n🔄 Progress: {i}/{len(sync_tables)} - {table}")
-                self.sync_table(table, local_conn, remote_conn, dry_run)
+            # Create progress tracker for tables
+            table_progress = ProgressTracker(len(sync_tables), "Syncing tables")
+            
+            try:
+                # Sync each table
+                for i, table in enumerate(sync_tables, 1):
+                    table_progress.set_description(f"Syncing {table} ({i}/{len(sync_tables)})")
+                    self.sync_table(table, local_conn, remote_conn, dry_run)
+                    table_progress.update(1)
+            finally:
+                table_progress.close()
             
             # Close connections
             local_conn.close()
