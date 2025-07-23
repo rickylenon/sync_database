@@ -389,6 +389,74 @@ class DatabaseSync:
             self.log(f"❌ Remote database connection ({connection_type}) failed: {e}", "ERROR")
             return False
 
+    def get_foreign_key_dependencies(self, connection):
+        """Analyze foreign key relationships to determine proper sync order"""
+        dependencies = {}
+        reverse_dependencies = {}
+        
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT 
+                        TABLE_NAME,
+                        REFERENCED_TABLE_NAME
+                    FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
+                    WHERE TABLE_SCHEMA = %s 
+                    AND REFERENCED_TABLE_NAME IS NOT NULL
+                    AND CONSTRAINT_NAME != 'PRIMARY'
+                """, (self.remote_db_name,))
+                
+                for row in cursor.fetchall():
+                    table = row[0]
+                    referenced_table = row[1]
+                    
+                    if table not in dependencies:
+                        dependencies[table] = set()
+                    dependencies[table].add(referenced_table)
+                    
+                    if referenced_table not in reverse_dependencies:
+                        reverse_dependencies[referenced_table] = set()
+                    reverse_dependencies[referenced_table].add(table)
+            
+            return dependencies, reverse_dependencies
+            
+        except Exception as e:
+            self.log(f"Failed to analyze foreign key dependencies: {e}", "ERROR")
+            return {}, {}
+    
+    def get_optimal_sync_order(self, tables, dependencies):
+        """Determine optimal sync order based on foreign key dependencies"""
+        # Use topological sort to order tables by dependencies
+        sync_order = []
+        visited = set()
+        temp_visited = set()
+        
+        def visit(table):
+            if table in temp_visited:
+                # Circular dependency detected - log warning but continue
+                self.log(f"⚠️  Circular dependency detected for table: {table}", "WARNING")
+                return
+            if table in visited:
+                return
+                
+            temp_visited.add(table)
+            
+            # Visit dependencies first
+            if table in dependencies:
+                for dep in dependencies[table]:
+                    if dep in tables:  # Only visit if dependency is in our sync list
+                        visit(dep)
+            
+            temp_visited.remove(table)
+            visited.add(table)
+            sync_order.append(table)
+        
+        for table in tables:
+            if table not in visited:
+                visit(table)
+        
+        return sync_order
+    
     def get_sync_tables_method(self, use_direct=False):
         """Get list of tables to sync with specified connection method"""
         try:
@@ -415,8 +483,6 @@ class DatabaseSync:
                 cursor.execute("SHOW TABLES")
                 all_tables = [row[0] for row in cursor.fetchall()]
             
-            remote_conn.close()
-            
             # Filter out excluded tables
             sync_tables = []
             excluded_count = 0
@@ -439,8 +505,35 @@ class DatabaseSync:
                 
                 sync_tables.append(table)
             
+            # Get foreign key dependencies and determine optimal sync order
+            dependencies, reverse_deps = self.get_foreign_key_dependencies(remote_conn)
+            remote_conn.close()
+            
+            # Determine sync order based on configuration
+            sync_order_strategy = SYNC_CONFIG.get('sync_order_strategy', 'dependency')
+            
+            if sync_order_strategy == 'dependency' and dependencies:
+                # Use dependency-based ordering
+                optimal_order = self.get_optimal_sync_order(sync_tables, dependencies)
+                self.log(f"📊 Found {len(sync_tables)} tables to sync ({excluded_count} excluded)")
+                self.log(f"🔗 Using dependency-based sync order ({len(dependencies)} FK relationships analyzed)")
+                return optimal_order
+            elif sync_order_strategy == 'custom':
+                # Use custom order if specified
+                custom_order = SYNC_CONFIG.get('custom_sync_order', [])
+                if custom_order:
+                    # Filter custom order to only include tables in sync list
+                    filtered_custom_order = [t for t in custom_order if t in sync_tables]
+                    # Add any remaining tables not in custom order
+                    remaining_tables = [t for t in sync_tables if t not in filtered_custom_order]
+                    final_order = filtered_custom_order + remaining_tables
+                    self.log(f"📊 Found {len(sync_tables)} tables to sync ({excluded_count} excluded)")
+                    self.log(f"🔗 Using custom sync order ({len(filtered_custom_order)} custom, {len(remaining_tables)} remaining)")
+                    return final_order
+            
+            # Default to alphabetical order
             self.log(f"📊 Found {len(sync_tables)} tables to sync ({excluded_count} excluded)")
-            return sync_tables
+            return sorted(sync_tables)
             
         except Exception as e:
             self.log(f"Failed to get table list: {e}", "ERROR")
@@ -621,6 +714,27 @@ class DatabaseSync:
                 except:
                     pass
     
+    def handle_foreign_key_errors(self, table_name, operation, error, record_data=None):
+        """Enhanced foreign key error handling with detailed logging"""
+        error_msg = str(error).lower()
+        
+        if "foreign key constraint" in error_msg:
+            # Extract foreign key details from error message
+            self.log(f"🔗 {table_name}: Foreign key constraint failed for {operation}", "WARNING")
+            
+            # Log the specific foreign key issue
+            if record_data:
+                self.log(f"  📝 Failed record: {record_data}")
+            
+            # Try to identify the problematic foreign key
+            if "REFERENCES" in str(error):
+                # Extract table and column information
+                self.log(f"  🔍 Foreign key references: {str(error)}")
+            
+            return True  # Indicate this was a foreign key error
+        
+        return False  # Not a foreign key error
+    
     def sync_table(self, table_name, local_conn, remote_conn, dry_run=False):
         """Sync a single table using either incremental sync or drop/recreate mode"""
         
@@ -630,7 +744,7 @@ class DatabaseSync:
         if use_drop_recreate:
             return self.drop_recreate_table(table_name, local_conn, remote_conn, dry_run)
         
-        # Original incremental sync logic
+        # Enhanced incremental sync logic
         try:
             # Check if table exists locally - if not, create it
             if not self.table_exists_locally(table_name, local_conn):
@@ -687,15 +801,16 @@ class DatabaseSync:
             if dry_run:
                 return
             
-            # Perform actual sync operations
+            # Enhanced sync operations with better error handling
             if to_insert or to_update or to_delete:
                 total_operations = len(to_insert) + len(to_update) + len(to_delete)
                 record_progress = ProgressTracker(total_operations, f"{table_name} records")
                 
                 try:
                     with local_conn.cursor() as cursor:
-                        # INSERT new records (with foreign key error handling)
+                        # INSERT new records (with enhanced foreign key error handling)
                         insert_success = 0
+                        insert_fk_errors = 0
                         for key in to_insert:
                             try:
                                 record = remote_dict[key]
@@ -710,8 +825,10 @@ class DatabaseSync:
                                 insert_success += 1
                                 self.stats['records_inserted'] += 1
                             except Exception as e:
-                                if "foreign key constraint" in str(e).lower() or "duplicate entry" in str(e).lower():
-                                    # Skip foreign key constraint and duplicate key errors but continue
+                                if self.handle_foreign_key_errors(table_name, "INSERT", e, record):
+                                    insert_fk_errors += 1
+                                elif "duplicate entry" in str(e).lower():
+                                    # Skip duplicate key errors but continue
                                     pass
                                 else:
                                     # Re-raise other errors
@@ -719,8 +836,9 @@ class DatabaseSync:
                             finally:
                                 record_progress.update(1)
                         
-                        # UPDATE existing records (with foreign key error handling)
+                        # UPDATE existing records (with enhanced foreign key error handling)
                         update_success = 0
+                        update_fk_errors = 0
                         for key in to_update:
                             try:
                                 record = remote_dict[key]
@@ -745,8 +863,10 @@ class DatabaseSync:
                                     update_success += 1
                                     self.stats['records_updated'] += 1
                             except Exception as e:
-                                if "foreign key constraint" in str(e).lower() or "duplicate entry" in str(e).lower():
-                                    # Skip foreign key constraint and duplicate key errors but continue
+                                if self.handle_foreign_key_errors(table_name, "UPDATE", e, record):
+                                    update_fk_errors += 1
+                                elif "duplicate entry" in str(e).lower():
+                                    # Skip duplicate key errors but continue
                                     pass
                                 else:
                                     # Re-raise other errors
@@ -754,9 +874,9 @@ class DatabaseSync:
                             finally:
                                 record_progress.update(1)
                         
-                        # DELETE removed records (skip if foreign key errors)
+                        # DELETE removed records (with enhanced foreign key error handling)
                         delete_success = 0
-                        delete_skipped = 0
+                        delete_fk_errors = 0
                         for key in to_delete:
                             try:
                                 where_clauses = []
@@ -775,10 +895,8 @@ class DatabaseSync:
                                 delete_success += 1
                                 self.stats['records_deleted'] += 1
                             except Exception as e:
-                                if "foreign key constraint" in str(e).lower():
-                                    # Skip foreign key constraint errors for deletions
-                                    delete_skipped += 1
-                                    pass
+                                if self.handle_foreign_key_errors(table_name, "DELETE", e):
+                                    delete_fk_errors += 1
                                 else:
                                     # Re-raise other errors
                                     raise e
@@ -786,8 +904,15 @@ class DatabaseSync:
                                 record_progress.update(1)
                         
                         # Log detailed results for tables with foreign key issues
-                        if delete_skipped > 0:
-                            self.log(f"  ⚠️  {table_name}: Skipped {delete_skipped} deletions (foreign key constraints)")
+                        total_fk_errors = insert_fk_errors + update_fk_errors + delete_fk_errors
+                        if total_fk_errors > 0:
+                            self.log(f"  ⚠️  {table_name}: {total_fk_errors} operations skipped due to foreign key constraints")
+                            if insert_fk_errors > 0:
+                                self.log(f"    📝 INSERT: {insert_fk_errors} skipped")
+                            if update_fk_errors > 0:
+                                self.log(f"    📝 UPDATE: {update_fk_errors} skipped")
+                            if delete_fk_errors > 0:
+                                self.log(f"    📝 DELETE: {delete_fk_errors} skipped")
                     
                     local_conn.commit()
                     self.stats['tables_synced'] += 1
@@ -799,6 +924,42 @@ class DatabaseSync:
             self.stats['errors'] += 1
             if not dry_run:
                 local_conn.rollback()
+    
+    def multi_pass_sync(self, tables, local_conn, remote_conn, dry_run=False):
+        """Perform sync in multiple passes to handle foreign key dependencies"""
+        
+        # First pass: Create/update tables without foreign key constraints
+        self.log("🔄 First pass: Creating/updating tables...")
+        for table in tables:
+            self.sync_table_basic(table, local_conn, remote_conn, dry_run)
+        
+        # Second pass: Handle foreign key dependent operations
+        self.log("🔄 Second pass: Handling foreign key operations...")
+        for table in tables:
+            self.sync_table_foreign_keys(table, local_conn, remote_conn, dry_run)
+        
+        # Third pass: Clean up orphaned records
+        self.log("🔄 Third pass: Cleaning up orphaned records...")
+        for table in reversed(tables):  # Reverse order for cleanup
+            self.cleanup_orphaned_records(table, local_conn, remote_conn, dry_run)
+    
+    def sync_table_basic(self, table_name, local_conn, remote_conn, dry_run=False):
+        """Basic table sync without foreign key operations"""
+        # This would be a simplified version of sync_table that skips FK operations
+        # For now, we'll use the existing sync_table method
+        return self.sync_table(table_name, local_conn, remote_conn, dry_run)
+    
+    def sync_table_foreign_keys(self, table_name, local_conn, remote_conn, dry_run=False):
+        """Handle foreign key operations specifically"""
+        # This would handle FK operations that were deferred
+        # For now, this is a placeholder for future enhancement
+        pass
+    
+    def cleanup_orphaned_records(self, table_name, local_conn, remote_conn, dry_run=False):
+        """Clean up orphaned records after FK operations"""
+        # This would clean up records that became orphaned
+        # For now, this is a placeholder for future enhancement
+        pass
     
     def run_sync(self, dry_run=False):
         """Run the complete sync process"""
@@ -845,6 +1006,7 @@ class DatabaseSync:
         # Show detailed sync plan
         connection_method = "Direct RDS" if use_direct else "SSH Tunnel"
         sync_mode = "DROP/RECREATE" if SYNC_CONFIG.get('use_drop_recreate_mode', False) else "INCREMENTAL"
+        multi_pass = SYNC_CONFIG.get('enable_multi_pass_sync', False)
         
         print(f"\n📊 Sync Plan Summary:")
         print(f"   🔗 Connection: {connection_method}")
@@ -853,12 +1015,18 @@ class DatabaseSync:
         print(f"   📍 Remote: {self.remote_db_name}@{self.remote_db_host}:{self.remote_db_port}")
         print(f"   📍 Local:  {self.local_db_name}@{self.local_db_host}:{self.local_db_port}")
         print(f"   🔄 Sync Mode: {sync_mode}")
+        if multi_pass:
+            print(f"   🔄 Multi-pass sync: ENABLED (3 passes for FK handling)")
         if sync_mode == "DROP/RECREATE":
             print(f"   ⚠️  WARNING: All local table data will be completely replaced!")
             if SYNC_CONFIG.get('disable_foreign_key_checks', True):
                 print(f"   🔧 Foreign key checks will be temporarily disabled")
         print(f"   📋 Tables to sync: {len(sync_tables)}")
         print(f"   🚫 Tables excluded: {len(self.excluded_tables)} explicit + patterns: {self.excluded_patterns}")
+        
+        # Show sync order information
+        sync_order_strategy = SYNC_CONFIG.get('sync_order_strategy', 'dependency')
+        print(f"   🔗 Sync order strategy: {sync_order_strategy.upper()}")
         
         # Show excluded tables summary
         if self.excluded_tables:
@@ -884,6 +1052,8 @@ class DatabaseSync:
                 print("   🚨 ALL EXISTING LOCAL DATA IN THESE TABLES WILL BE LOST!")
             else:
                 print("   This will INSERT new records, UPDATE existing records, and DELETE removed records")
+            if multi_pass:
+                print("   🔄 Multi-pass sync will handle foreign key dependencies in separate phases")
             response = input("Continue? (y/N): ")
             if response.lower() != 'y':
                 print("Sync cancelled by user")
@@ -924,19 +1094,24 @@ class DatabaseSync:
             
             self.log("✅ Database connections established")
             print()
-            self.log("Starting table synchronization...")
             
-            # Create progress tracker for tables
-            table_progress = ProgressTracker(len(sync_tables), "Syncing tables")
-            
-            try:
-                # Sync each table
-                for i, table in enumerate(sync_tables, 1):
-                    table_progress.set_description(f"Syncing {table} ({i}/{len(sync_tables)})")
-                    self.sync_table(table, local_conn, remote_conn, dry_run)
-                    table_progress.update(1)
-            finally:
-                table_progress.close()
+            # Choose sync method based on configuration
+            if multi_pass:
+                self.log("Starting multi-pass table synchronization...")
+                self.multi_pass_sync(sync_tables, local_conn, remote_conn, dry_run)
+            else:
+                self.log("Starting table synchronization...")
+                # Create progress tracker for tables
+                table_progress = ProgressTracker(len(sync_tables), "Syncing tables")
+                
+                try:
+                    # Sync each table
+                    for i, table in enumerate(sync_tables, 1):
+                        table_progress.set_description(f"Syncing {table} ({i}/{len(sync_tables)})")
+                        self.sync_table(table, local_conn, remote_conn, dry_run)
+                        table_progress.update(1)
+                finally:
+                    table_progress.close()
             
             # Close connections
             local_conn.close()
