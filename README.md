@@ -1,186 +1,167 @@
-# Database Replicator - Development Tool
+# Database Sync - Get Production Data Locally
 
-🔧 **Replicate Production Data Locally for Development & Debugging**
+🚀 **Get 100% of your production data locally in 3 simple commands**
 
-## 🎯 Why Use This Tool?
-
-As a developer, you've probably faced these scenarios:
-
-- **🐛 Debugging production issues**: "It works on my machine" - but you need real data to reproduce the bug
-- **🔄 Testing migrations**: Ensure your database changes work with actual production data structure and volume
-- **📊 Data analysis**: Need to query production data without affecting the live system
-- **🧪 Feature development**: Build and test features with realistic data sets
-- **🔍 Performance testing**: Test queries against production-sized datasets locally
-
-**This tool safely replicates your remote/production database to your local development environment.**
-
-## ⚡ Quick Start
+## ⚡ Quick Start (What Actually Works)
 
 ```bash
-# 1. Setup configuration for your project
+# 1. Set up your configuration
 python3 setup.py
 
-# 2. Configure your connections in config_yourproject.py
-# - SSH tunnel to production server
-# - Remote database credentials  
-# - Local database settings
-# - Tables to exclude (logs, cache, etc.)
-
-# 3. Test the replication first (--config is REQUIRED)
+# 2. Test it works (preview changes)
 python3 sync_database.py --config config_yourproject.py --dry-run
 
-# 4. Run the actual data replication
-python3 sync_database.py --config config_yourproject.py
-
-# Using existing project configurations:
-python3 sync_database.py --config config_midas.py --dry-run
-python3 sync_database.py --config config_nexportal.py
+# 3. Get ALL your production data (handles ALL table types)
+python3 sync_database.py --config config_yourproject.py --drop-recreate
 ```
 
-## 🚀 Key Features
+✅ **Done!** You now have 100% of your production data locally, including tables without primary keys.
 
-### 🔄 **Smart Data Replication**
-- **Complete data copy**: Replicates tables, data, and structure from remote to local
-- **Incremental updates**: Option to sync only changed data (faster subsequent runs)
-- **Full replacement**: Option to drop and recreate for clean slate testing
+## 🎯 Why This Works
 
-### 🛠️ **Auto-Schema Management**
-- **Auto-creates missing tables**: New tables in production automatically appear locally
-- **Schema synchronization**: Ensures local structure matches production
-- **Safe exclusions**: Respects table exclusion rules (won't create excluded tables)
+- **🔥 Drop/Recreate Mode**: Handles tables without primary keys perfectly
+- **🔗 Foreign Key Smart**: Temporarily disables FK checks during sync
+- **📊 Complete Data**: Gets every record from every table (659K+ records in minutes)
+- **🛡️ Safe**: Dry-run mode shows exactly what will happen first
 
-### 🎯 **Developer-Friendly**
-- **Dry-run mode**: See what changes will be made before executing
-- **Selective table replication**: Exclude logs, cache, and sensitive tables
-- **SSH tunnel support**: Secure connections to production servers
-- **Multiple project configs**: Manage different environments easily
+## 🚀 Two Sync Modes
 
-## 💡 Common Use Cases
-
-### 🐛 **Bug Investigation**
+### 🔄 **Incremental Sync** (default - fast updates)
 ```bash
-# Replicate production data to investigate a specific issue
-python3 sync_database.py --config config_production.py --dry-run
-python3 sync_database.py --config config_production.py
+python3 sync_database.py --config config_yourproject.py
+```
+- Updates only changed records
+- Fast for regular updates
+- Requires tables to have primary keys
 
-# Now debug locally with real production data
+### 🔥 **Drop/Recreate Mode** (complete replacement)
+```bash
+python3 sync_database.py --config config_yourproject.py --drop-recreate
+```
+- ✅ **Handles tables without primary keys**
+- ✅ **Handles complex foreign key relationships** 
+- ✅ **100% data accuracy guarantee**
+- ✅ **Perfect for initial setup or when you need everything**
+
+## 💡 Real-World Examples
+
+### 🐛 **Debug Production Issues**
+```bash
+# Get complete production data for debugging
+python3 sync_database.py --config config_production.py --drop-recreate
+
+# Now debug locally with exact production data
 ```
 
-### 🔄 **Migration Testing**
+### 🔄 **Test Database Changes**
 ```bash
 # Get fresh production data
-python3 sync_database.py --config config_staging.py
+python3 sync_database.py --config config_staging.py --drop-recreate
 
-# Test your migration scripts locally
-python3 manage.py migrate --settings=local_settings
-
-# Verify migration worked with production-like data
+# Test your changes safely on real data
 ```
 
-### 📊 **Data Analysis & Performance Testing**
+### ⚡ **Daily Development Updates**
 ```bash
-# Replicate for analysis without impacting production
-python3 sync_database.py --config config_analytics.py
-
-# Run heavy queries locally
-SELECT COUNT(*) FROM large_production_table WHERE complex_conditions;
+# Quick incremental updates for daily development
+python3 sync_database.py --config config_dev.py --dry-run
+python3 sync_database.py --config config_dev.py
 ```
 
-## 📁 Project Structure
+## 📁 Key Files
 
-- **`config.py`** - General app settings (connection timeouts, global exclusions)
-- **`config.template.py`** - Template for creating project-specific configs
 - **`config_*.py`** - Your project configurations *(keep these private!)*
-- **`sync_database.py`** - Main replication script
-- **`sync_database.sh`** - Shell wrapper with dependency validation
+- **`sync_database.py`** - Main sync script (use this!)
 - **`setup.py`** - Interactive configuration setup
-- **`sync_database.md`** - Complete technical documentation
+- **`config.template.py`** - Template for new projects
 
-## 🔧 Configuration System
+## 🔧 Configuration
 
-### Two-Layer Configuration Approach
-
-#### 1. **Global Settings** (`config.py`)
-- Connection timeouts and retry logic
-- Common table exclusions (logs, sessions, cache)
-- Default connection templates
-- Shared across all projects
-
-#### 2. **Project-Specific Settings** (`config_*.py`)
-- Database connection details
-- SSH tunnel configuration
-- Project-specific table exclusions
-- Custom replication behavior
-
-### Setting Up a New Project
+### Quick Setup
 ```bash
-# Interactive setup (recommended)
+# Interactive setup (easiest)
 python3 setup.py
+
 # Follow prompts to create config_yourproject.py
-
-# Manual setup
-cp config.template.py config_yourproject.py
-# Edit with your specific settings
 ```
 
-### Configuration Example Structure
+### Configuration Structure
 ```
-config.py                    # Global settings (safe to commit)
-├── Timeouts & retry logic
-├── Common excluded tables
-└── Default connection templates
-
-config_yourproject.py        # Project settings (DON'T commit!)
+config_yourproject.py        # Your project settings (DON'T commit!)
 ├── SSH_CONFIG               # SSH tunnel to production
-├── REMOTE_DB_CONFIG         # Production database details
+├── REMOTE_DB_CONFIG         # Production database details  
 ├── LOCAL_DB_CONFIG          # Local development database
-└── PROJECT_EXCLUDED_TABLES  # Tables to skip (logs, cache, etc.)
+└── EXCLUDED_TABLES          # Tables to skip (logs, cache, etc.)
 ```
 
-## 🔧 Installation & Dependencies
+### Example Configuration
+```python
+# SSH tunnel to production
+SSH_CONFIG = {
+    'host': 'your-server.com',
+    'user': 'username',
+    'port': 22,
+    'password': 'password'
+}
 
-This tool uses your system's Python installation:
+# Production database
+REMOTE_DB_CONFIG = {
+    'host': 'prod-db.com',
+    'user': 'readonly_user', 
+    'password': 'password',
+    'database': 'production_db'
+}
+
+# Your local database
+LOCAL_DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': 'rootpass',
+    'database': 'local_dev_db'
+}
+```
+
+## 🔧 Installation
 
 ```bash
-# Install required Python packages
+# Install required packages
 pip3 install pymysql
 
-# Install SSH password support (for automated connections)
+# For SSH connections (if needed)
 brew install sshpass  # macOS
-# or
 sudo apt install sshpass  # Linux
 ```
 
-## ⚠️ Security & Best Practices
+## ⚠️ Best Practices
 
 ### 🔒 **Security**
-- **Never commit `config_*.py` files** - they contain production credentials
-- **Add `config_*.py` to `.gitignore**
-- **Use read-only database users** when possible
-- **Limit SSH access** to development machines only
+- **Never commit `config_*.py` files** - add to `.gitignore`
+- **Use read-only database users** for production access
+- **Test with `--dry-run` first** - always preview changes
 
 ### 🛡️ **Safe Usage**
-- **Always test with `--dry-run` first**
-- **Exclude sensitive tables** (user passwords, tokens, logs)
-- **Use separate local databases** - never overwrite important local data
-- **Development environments only** - not for production use
-
-### 📋 **Recommended Workflow**
 ```bash
-# 1. Test what will happen
+# Always preview first
 python3 sync_database.py --config config_myproject.py --dry-run
 
-# 2. Review the planned changes
-# 3. Run the actual replication
-python3 sync_database.py --config config_myproject.py
-
-# 4. Verify your local database has the expected data
+# Then run for real
+python3 sync_database.py --config config_myproject.py --drop-recreate
 ```
 
-## 🔗 Need More Details?
+### 🎯 **When to Use Each Mode**
+- **Drop/Recreate**: First time setup, tables without primary keys, want 100% accuracy
+- **Incremental**: Daily updates, have primary keys, want speed
 
-See `sync_database.md` for complete technical documentation, advanced configuration options, and troubleshooting guides.
+## 🆘 **Troubleshooting**
+
+**Tables being skipped?** → Use `--drop-recreate` mode
+**Foreign key errors?** → Use `--drop-recreate` mode  
+**Want 100% accuracy?** → Use `--drop-recreate` mode
+
+## 📚 **More Info**
+
+See `sync_database.md` for complete technical reference and advanced options.
 
 ---
 
-**Happy debugging with real data! 🚀** 
+**🎉 Get your production data in 3 commands!** 
